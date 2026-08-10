@@ -202,6 +202,10 @@ def file_upload_to_s3(doc, method):
     """
     check and upload files to s3. the path check and
     """
+    if doc.attached_to_doctype in frappe.db.get_all("Doctype to Ignore S3 Attachments", pluck="doc_type"):
+        return
+    if not frappe.db.get_single_value("S3 File Attachment", "enable_s3_attachment"):
+        return
     s3_upload = S3Operations()
     path = doc.file_url
     site_path = frappe.utils.get_site_path()
@@ -325,6 +329,10 @@ def migrate_existing_files():
 
 def delete_from_cloud(doc, method):
     """Delete file from s3"""
+    if doc.attached_to_doctype in frappe.db.get_all("Doctype to Ignore S3 Attachments", pluck="doc_type"):
+        return
+    if not frappe.db.get_single_value("S3 File Attachment", "enable_s3_attachment"):
+        return
     s3 = S3Operations()
     s3.delete_from_s3(doc.content_hash)
 
