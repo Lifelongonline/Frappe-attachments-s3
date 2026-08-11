@@ -111,31 +111,19 @@ class S3Operations(object):
         key = self.key_generator(file_name, parent_doctype, parent_name)
         content_type = mime_type
         try:
-            if is_private:
-                self.S3_CLIENT.upload_file(
-                    file_path, self.BUCKET, key,
-                    ExtraArgs={
+            self.S3_CLIENT.upload_file(
+                file_path, self.BUCKET, key,
+                ExtraArgs={
+                    "ContentType": content_type,
+                    "Metadata": {
                         "ContentType": content_type,
-                        "Metadata": {
-                            "ContentType": content_type,
-                            "file_name": file_name
-                        }
+                        "file_name": file_name
                     }
-                )
-            else:
-                self.S3_CLIENT.upload_file(
-                    file_path, self.BUCKET, key,
-                    ExtraArgs={
-                        "ContentType": content_type,
-                        "ACL": 'public-read',
-                        "Metadata": {
-                            "ContentType": content_type,
-
-                        }
-                    }
-                )
+                }
+            )
 
         except boto3.exceptions.S3UploadFailedError:
+            frappe.log_error("File Upload Failed")
             frappe.throw(frappe._("File Upload Failed. Please try again."))
         return key
 
@@ -314,17 +302,47 @@ def s3_file_regex_match(file_url):
 def migrate_existing_files():
     """
     Function to migrate the existing files to s3.
+
+    Files pending migration are split into batches and each batch is
+    enqueued as a separate background job, instead of migrating every
+    file synchronously within the request.
     """
     # get_all_files_from_public_folder_and_upload_to_s3
+    batch_size = 1000
     files_list = frappe.get_all(
         'File',
         fields=['name', 'file_url', 'file_name']
     )
-    for file in files_list:
-        if file['file_url']:
-            if not s3_file_regex_match(file['file_url']):
-                upload_existing_files_s3(file['name'], file['file_name'])
+    files_to_migrate = [
+        file for file in files_list
+        if file['file_url'] and not s3_file_regex_match(file['file_url'])
+    ]
+
+    for index in range(0, len(files_to_migrate), batch_size):
+        batch = files_to_migrate[index:index + batch_size]
+        frappe.enqueue(
+            method=migrate_files_batch,
+            queue='long',
+            timeout=25000,
+            job_name='s3_migrate_batch_{0}'.format(index // batch_size),
+            files=batch,
+        )
     return True
+
+
+def migrate_files_batch(files):
+    """
+    Migrate a batch of files to s3.
+
+    Runs as a background job, enqueued in chunks of `batch_size` by
+    `migrate_existing_files`.
+    """
+    for file in files:
+        try:
+            upload_existing_files_s3(file['name'], file['file_name'])
+            frappe.db.commit()
+        except Exception as e:
+            frappe.db.rollback()
 
 
 def delete_from_cloud(doc, method):

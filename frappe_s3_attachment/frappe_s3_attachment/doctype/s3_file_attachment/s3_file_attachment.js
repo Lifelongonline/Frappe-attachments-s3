@@ -12,7 +12,7 @@ frappe.ui.form.on('S3 File Attachment', {
             callback: function (data) {
                 if (data.message) {
 					frappe.msgprint('Upload Successful')
-					location.reload(true);
+					// location.reload(true);
                 } else {
                     frappe.msgprint('Retry');
                 }
