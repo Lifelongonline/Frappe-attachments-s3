@@ -15,7 +15,12 @@ import frappe
 
 
 import magic
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse, parse_qs
+
+# Marker used to detect a File.file_url that already points at our own S3
+# streaming endpoint, i.e. the file has already been uploaded to S3 and is
+# not a path on local disk.
+S3_STREAM_URL_MARKER = "frappe_s3_attachment.controller.generate_file"
 
 # Extensions that browsers can render/execute (HTML, SVG, XML markup can
 # carry embedded <script>). These are always forced to download, regardless
@@ -31,6 +36,26 @@ INLINE_ALLOWLIST_EXTENSIONS = {
     ".mp4", ".webm", ".mov",
     ".txt",
 }
+
+
+def get_s3_key_from_file_url(file_url):
+    """
+    If file_url already points to our S3 streaming endpoint, extract the
+    underlying S3 object key from it.
+
+    This happens when a File record is copied over without going through
+    file_upload_to_s3 again first - e.g. when a document is cancelled and
+    amended, frappe.model.document.copy_attachments_from_amended_from()
+    creates a new File record re-using the old file_url as-is and calls
+    doc.save(), which fires this app's after_insert hook a second time.
+    In that case file_url is our /api/method/...generate_file redirect,
+    not a path on local disk, so it must not be re-uploaded.
+    """
+    if not file_url or S3_STREAM_URL_MARKER not in file_url:
+        return None
+    query = parse_qs(urlparse(file_url).query)
+    keys = query.get("key")
+    return unquote(keys[0]) if keys else None
 
 
 def get_content_disposition_type(file_name):
@@ -228,6 +253,18 @@ def file_upload_to_s3(doc, method):
         return
     if not frappe.db.get_single_value("S3 File Attachment", "enable_s3_attachment"):
         return
+
+    existing_key = get_s3_key_from_file_url(doc.file_url)
+    if existing_key:
+        # Already uploaded to S3 (e.g. this File record was copied over by
+        # copy_attachments_from_amended_from on cancel + amend). There is no
+        # local file to upload - just keep content_hash pointing at the
+        # existing S3 key so deletion/cleanup keeps working.
+        if doc.content_hash != existing_key:
+            frappe.db.set_value("File", doc.name, "content_hash", existing_key)
+            doc.content_hash = existing_key
+        return
+
     s3_upload = S3Operations()
     path = doc.file_url
     site_path = frappe.utils.get_site_path()
@@ -260,7 +297,6 @@ def file_upload_to_s3(doc, method):
         if parent_doctype and frappe.get_meta(parent_doctype).get('image_field'):
             frappe.db.set_value(parent_doctype, parent_name, frappe.get_meta(parent_doctype).get('image_field'), file_url)
 
-        frappe.db.commit()
 
 
 @frappe.whitelist()
