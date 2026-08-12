@@ -284,7 +284,7 @@ def file_upload_to_s3(doc, method):
 
         method = "frappe_s3_attachment.controller.generate_file"
         file_url = "/api/method/{0}?key={1}&file_name={2}".format(
-            method, quote(key, safe=''), quote(doc.file_name, safe='')
+            method, key, doc.file_name
         )
 
         os.remove(file_path)
@@ -338,7 +338,7 @@ def upload_existing_files_s3(name, file_name):
 
         method = "frappe_s3_attachment.controller.generate_file"
         file_url = "/api/method/{0}?key={1}&file_name={2}".format(
-            method, quote(key, safe=''), quote(file_name, safe='')
+            method, key, file_name
         )
 
         os.remove(file_path)
