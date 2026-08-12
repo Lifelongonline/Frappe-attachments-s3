@@ -422,6 +422,67 @@ def migrate_files_batch(files):
             frappe.db.rollback()
 
 
+@frappe.whitelist()
+def fix_double_encoded_file_urls():
+    """
+    Rebuild file_url for File records that were saved with the S3 key /
+    file name already percent-encoded (a since-reverted change caused
+    Frappe's own link rendering to quote them a second time, e.g.
+    '%20' -> '%2520', '%2F' -> '%252F').
+
+    Rebuilds file_url from content_hash (the real, raw S3 key - never
+    touched by the bug) and file_name (the raw filename), matching
+    what the controller now saves for new uploads. Safe to run
+    repeatedly - records already in the correct form are left alone.
+
+    Batched the same way as `migrate_existing_files`, since this can
+    run over the whole File table.
+    """
+    batch_size = 1000
+    files = frappe.get_all(
+        'File',
+        filters={'file_url': ['like', '/api/method/frappe_s3_attachment.controller.generate_file?key=%']},
+        fields=['name', 'file_url', 'file_name', 'content_hash']
+    )
+
+    for index in range(0, len(files), batch_size):
+        batch = files[index:index + batch_size]
+        frappe.enqueue(
+            method=fix_file_urls_batch,
+            queue='long',
+            timeout=25000,
+            job_name='s3_fix_file_url_batch_{0}'.format(index // batch_size),
+            files=batch,
+        )
+    return True
+
+
+def fix_file_urls_batch(files):
+    """
+    Rebuild file_url for a batch of File records.
+
+    Runs as a background job, enqueued in chunks of `batch_size` by
+    `fix_double_encoded_file_urls`.
+    """
+    method = "frappe_s3_attachment.controller.generate_file"
+    for file in files:
+        try:
+            key = file.get('content_hash')
+            if not key:
+                continue
+            correct_url = "/api/method/{0}?key={1}&file_name={2}".format(
+                method, key, file.get('file_name') or ''
+            )
+            if file.get('file_url') != correct_url:
+                frappe.db.set_value(
+                    'File', file['name'], 'file_url', correct_url,
+                    update_modified=False
+                )
+            frappe.db.commit()
+        except Exception:
+            frappe.db.rollback()
+
+
 def delete_from_cloud(doc, method):
     """Delete file from s3"""
     if doc.attached_to_doctype in frappe.db.get_all("Doctype to Ignore S3 Attachments", pluck="doc_type"):
