@@ -15,7 +15,7 @@ import frappe
 
 
 import magic
-
+from urllib.parse import quote
 
 class S3Operations(object):
 
@@ -174,7 +174,9 @@ class S3Operations(object):
 
         }
         if file_name:
-            params['ResponseContentDisposition'] = 'filename={}'.format(file_name)
+            params['ResponseContentDisposition'] = (
+                "attachment; filename*=UTF-8''{}".format(quote(file_name))
+            )
 
         url = self.S3_CLIENT.generate_presigned_url(
             'get_object',
