@@ -17,6 +17,35 @@ import frappe
 import magic
 from urllib.parse import quote
 
+# Extensions that browsers can render/execute (HTML, SVG, XML markup can
+# carry embedded <script>). These are always forced to download, regardless
+# of what the detected mime type says - relying on mime-type sniffing alone
+# is not a safe boundary against crafted or ambiguous files.
+INLINE_DENYLIST_EXTENSIONS = {".html", ".htm", ".xhtml", ".svg", ".xml"}
+
+# Extensions considered safe to preview inline in the browser.
+INLINE_ALLOWLIST_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
+    ".pdf",
+    ".mp3", ".wav", ".ogg",
+    ".mp4", ".webm", ".mov",
+    ".txt",
+}
+
+
+def get_content_disposition_type(file_name):
+    """
+    Decide whether a file should be previewed inline in the browser or
+    forced to download as an attachment, based on its extension.
+    """
+    ext = os.path.splitext(file_name or "")[1].lower()
+    if ext in INLINE_DENYLIST_EXTENSIONS:
+        return "attachment"
+    if ext in INLINE_ALLOWLIST_EXTENSIONS:
+        return "inline"
+    return "attachment"
+
+
 class S3Operations(object):
 
     def __init__(self):
@@ -117,7 +146,7 @@ class S3Operations(object):
                     "ContentType": content_type,
                     "Metadata": {
                         "ContentType": content_type,
-                        "file_name": file_name
+                        "file_name": quote(file_name, safe='')
                     }
                 }
             )
@@ -174,8 +203,11 @@ class S3Operations(object):
 
         }
         if file_name:
+            disposition_type = get_content_disposition_type(file_name)
             params['ResponseContentDisposition'] = (
-                "attachment; filename*=UTF-8''{}".format(quote(file_name))
+                "{0}; filename*=UTF-8''{1}".format(
+                    disposition_type, quote(file_name, safe='')
+                )
             )
 
         url = self.S3_CLIENT.generate_presigned_url(
@@ -214,7 +246,9 @@ def file_upload_to_s3(doc, method):
         )
 
         method = "frappe_s3_attachment.controller.generate_file"
-        file_url = """/api/method/{0}?key={1}&file_name={2}""".format(method, key, doc.file_name)
+        file_url = "/api/method/{0}?key={1}&file_name={2}".format(
+            method, quote(key, safe=''), quote(doc.file_name, safe='')
+        )
 
         os.remove(file_path)
         frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
@@ -267,7 +301,9 @@ def upload_existing_files_s3(name, file_name):
         )
 
         method = "frappe_s3_attachment.controller.generate_file"
-        file_url = """/api/method/{0}?key={1}""".format(method, key)
+        file_url = "/api/method/{0}?key={1}&file_name={2}".format(
+            method, quote(key, safe=''), quote(file_name, safe='')
+        )
 
         os.remove(file_path)
         doc = frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,

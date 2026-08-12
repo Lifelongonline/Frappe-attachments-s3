@@ -4,3 +4,4 @@
 *.swp
 tags
 frappe_s3_attachment/docs/current
+*.patch
