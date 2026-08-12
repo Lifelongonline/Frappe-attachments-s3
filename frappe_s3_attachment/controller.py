@@ -342,9 +342,24 @@ def upload_existing_files_s3(name, file_name):
         )
 
         os.remove(file_path)
-        doc = frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
+        frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
             old_parent=%s, content_hash=%s WHERE name=%s""", (
             file_url, 'Home/Attachments', 'Home/Attachments', key, doc.name))
+
+        if (
+            parent_doctype and parent_name
+            and frappe.db.exists(parent_doctype, parent_name)
+            # If the attachment belongs to a child table row, attached_to_field
+            # is a field on the child doctype, not on parent_doctype - skip it,
+            # there's no single column on the parent to update in that case.
+            and doc.attached_to_field
+            and frappe.get_meta(parent_doctype).has_field(doc.attached_to_field)
+        ):
+            frappe.db.set_value(
+                parent_doctype, parent_name, doc.attached_to_field,
+                file_url, update_modified=False
+            )
+
         frappe.db.commit()
     else:
         pass
