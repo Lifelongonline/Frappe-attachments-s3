@@ -211,15 +211,9 @@ def file_upload_to_s3(doc, method):
             parent_name
         )
 
-        if doc.is_private:
-            method = "frappe_s3_attachment.controller.generate_file"
-            file_url = """/api/method/{0}?key={1}&file_name={2}""".format(method, key, doc.file_name)
-        else:
-            file_url = '{}/{}/{}'.format(
-                s3_upload.S3_CLIENT.meta.endpoint_url,
-                s3_upload.BUCKET,
-                key
-            )
+        method = "frappe_s3_attachment.controller.generate_file"
+        file_url = """/api/method/{0}?key={1}&file_name={2}""".format(method, key, doc.file_name)
+
         os.remove(file_path)
         frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
             old_parent=%s, content_hash=%s WHERE name=%s""", (
@@ -270,15 +264,9 @@ def upload_existing_files_s3(name, file_name):
             parent_name
         )
 
-        if doc.is_private:
-            method = "frappe_s3_attachment.controller.generate_file"
-            file_url = """/api/method/{0}?key={1}""".format(method, key)
-        else:
-            file_url = '{}/{}/{}'.format(
-                s3_upload.S3_CLIENT.meta.endpoint_url,
-                s3_upload.BUCKET,
-                key
-            )
+        method = "frappe_s3_attachment.controller.generate_file"
+        file_url = """/api/method/{0}?key={1}""".format(method, key)
+
         os.remove(file_path)
         doc = frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
             old_parent=%s, content_hash=%s WHERE name=%s""", (
