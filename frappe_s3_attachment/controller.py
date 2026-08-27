@@ -249,6 +249,8 @@ def file_upload_to_s3(doc, method):
     """
     check and upload files to s3. the path check and
     """
+    if doc.is_folder:
+        return
     if doc.attached_to_doctype in frappe.db.get_all("Doctype to Ignore S3 Attachments", pluck="doc_type"):
         return
     if not frappe.db.get_single_value("S3 File Attachment", "enable_s3_attachment"):
