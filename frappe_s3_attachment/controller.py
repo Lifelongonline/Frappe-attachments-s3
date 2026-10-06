@@ -662,8 +662,15 @@ def migrate_files_batch(files):
         try:
             upload_existing_files_s3(file['name'], file['file_name'])
             frappe.db.commit()
-        except Exception as e:
+        except Exception:
             frappe.db.rollback()
+            frappe.log_error(
+                title="S3 migration failed",
+                reference_doctype="File",
+                reference_name=file["name"],
+            )
+            # Commit so a later file's rollback doesn't discard this log.
+            frappe.db.commit()
 
 
 @frappe.whitelist()
