@@ -78,7 +78,7 @@ class S3Operations(object):
         Function to initialise the aws settings from frappe S3 File attachment
         doctype.
         """
-        self.s3_settings_doc = frappe.get_doc(
+        self.s3_settings_doc = frappe.get_cached_doc(
             'S3 File Attachment',
             'S3 File Attachment',
         )
@@ -263,7 +263,7 @@ def file_upload_to_s3(doc, method):
     """
     if doc.is_folder:
         return
-    if (doc.attached_to_doctype or 'File') in get_ignored_s3_doctypes():
+    if doc.attached_to_doctype in frappe.db.get_all("Doctype to Ignore S3 Attachments", pluck="doc_type"):
         return
     if not frappe.db.get_single_value("S3 File Attachment", "enable_s3_attachment"):
         return
@@ -284,64 +284,32 @@ def file_upload_to_s3(doc, method):
     site_path = frappe.utils.get_site_path()
     parent_doctype = doc.attached_to_doctype or 'File'
     parent_name = doc.attached_to_name
+    ignore_s3_upload_for_doctype = frappe.local.conf.get('ignore_s3_upload_for_doctype') or ['Data Import']
+    if parent_doctype not in ignore_s3_upload_for_doctype:
+        if not doc.is_private:
+            file_path = site_path + '/public' + path
+        else:
+            file_path = site_path + path
+        key = s3_upload.upload_files_to_s3_with_key(
+            file_path, doc.file_name,
+            doc.is_private, parent_doctype,
+            parent_name
+        )
 
-    if not doc.is_private:
-        file_path = site_path + '/public' + path
-    else:
-        file_path = site_path + path
+        method = "frappe_s3_attachment.controller.generate_file"
+        file_url = "/api/method/{0}?key={1}&file_name={2}".format(
+            method, key, doc.file_name
+        )
 
-    original_content_hash = doc.content_hash
-
-    key = s3_upload.upload_files_to_s3_with_key(
-        file_path, doc.file_name,
-        doc.is_private, parent_doctype,
-        parent_name
-    )
-
-    method = "frappe_s3_attachment.controller.generate_file"
-    file_url = "/api/method/{0}?key={1}&file_name={2}".format(
-        method, key, doc.file_name
-    )
-
-    frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
-        old_parent=%s, content_hash=%s WHERE name=%s""", (
-        file_url, 'Home/Attachments', 'Home/Attachments', key, doc.name))
-
-    doc.file_url = file_url
-
-    if parent_doctype and frappe.get_meta(parent_doctype).get('image_field'):
-        frappe.db.set_value(parent_doctype, parent_name, frappe.get_meta(parent_doctype).get('image_field'), file_url)
-
-    sync_attached_field_url(doc, file_url, path)
-
-    # Another File record can point at this exact same physical file
-    # (the same content attached to a different document) - resolve
-    # every such not-yet-migrated sibling now, in this same pass,
-    # since content_hash is about to be overwritten with the S3 key
-    # and this is the only moment their shared identity is still
-    # visible. See upload_existing_files_s3 for the full rationale.
-    # Siblings belonging to an ignored doctype are skipped - their local
-    # file must survive untouched, exactly as if they were never involved.
-    if original_content_hash:
-        ignored_doctypes = get_ignored_s3_doctypes()
-        siblings = frappe.get_all("File", filters={
-            "name": ["!=", doc.name],
-            "content_hash": original_content_hash,
-            "file_url": ["not like", f"%{S3_STREAM_URL_MARKER}%"],
-        }, fields=["name", "attached_to_doctype", "file_url"])
-        for sibling in siblings:
-            if (sibling.attached_to_doctype or 'File') in ignored_doctypes:
-                continue
-            sibling_doc = frappe.get_doc("File", sibling.name)
-            frappe.db.sql(
-                "UPDATE `tabFile` SET file_url=%s, content_hash=%s WHERE name=%s",
-                (file_url, key, sibling.name)
-            )
-            sync_attached_field_url(sibling_doc, file_url, sibling.file_url)
-
-    if not has_other_pending_reference(doc, path):
         os.remove(file_path)
-
+        frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
+            old_parent=%s, content_hash=%s WHERE name=%s""", (
+            file_url, 'Home/Attachments', 'Home/Attachments', key, doc.name))
+        
+        doc.file_url = file_url
+        
+        if parent_doctype and frappe.get_meta(parent_doctype).get('image_field'):
+            frappe.db.set_value(parent_doctype, parent_name, frappe.get_meta(parent_doctype).get('image_field'), file_url)
 
 
 @frappe.whitelist()
@@ -390,6 +358,9 @@ def _write_if_unclaimed(doctype, name, fieldname, current_value, original_file_u
     and silently picking whichever gets processed last would let a stale
     file clobber a field that's actually showing a different, current one.
     """
+    # Already set by a sibling row's sync (see _sync_sibling_rows) - not a conflict.
+    if current_value == file_url:
+        return True
     if current_value and not _matches_source_file(current_value, original_file_url, file_name):
         frappe.log_error(
             "S3 attachment field conflict",
@@ -432,8 +403,11 @@ def sync_attached_field_url(doc, file_url, original_file_url=None):
         meta = frappe.get_meta(parent_doctype)
         if fieldname and meta.has_field(fieldname):
             current_value = frappe.db.get_value(parent_doctype, parent_name, fieldname)
-            _write_if_unclaimed(parent_doctype, parent_name, fieldname, current_value,
-                                 original_file_url, file_name, file_url)
+            written = _write_if_unclaimed(parent_doctype, parent_name, fieldname, current_value,
+                                          original_file_url, file_name, file_url)
+            # attached_to_doctype can itself be the child doctype.
+            if written and meta.istable:
+                _sync_sibling_rows(parent_doctype, parent_name, fieldname, original_file_url, file_url)
             return
         # fieldname is blank, or it names a field that only exists on one
         # of the parent's own child tables - search those, scoped to
@@ -451,8 +425,9 @@ def sync_attached_field_url(doc, file_url, original_file_url=None):
     child_meta = frappe.get_meta(child_doctype)
     if fieldname and child_meta.has_field(fieldname):
         current_value = frappe.db.get_value(child_doctype, row_name, fieldname)
-        _write_if_unclaimed(child_doctype, row_name, fieldname, current_value,
-                             original_file_url, file_name, file_url)
+        if _write_if_unclaimed(child_doctype, row_name, fieldname, current_value,
+                               original_file_url, file_name, file_url):
+            _sync_sibling_rows(child_doctype, row_name, fieldname, original_file_url, file_url)
         return
 
     # fieldname is blank - we already know exactly which row this is, so
@@ -464,6 +439,7 @@ def sync_attached_field_url(doc, file_url, original_file_url=None):
         current_value = row.get(df.fieldname)
         if _matches_source_file(current_value, original_file_url, file_name):
             frappe.db.set_value(child_doctype, row_name, df.fieldname, file_url, update_modified=False)
+            _sync_sibling_rows(child_doctype, row_name, df.fieldname, original_file_url, file_url)
             return
 
 
@@ -491,7 +467,48 @@ def _sync_via_child_tables(meta, parent_name, fieldname, file_name, original_fil
                 current_value = row.get(cf)
                 if _matches_source_file(current_value, original_file_url, file_name):
                     frappe.db.set_value(table_df.options, row.name, cf, file_url, update_modified=False)
+                    _sync_sibling_rows(table_df.options, row.name, cf, original_file_url, file_url)
                     return
+
+
+def _sync_sibling_rows(child_doctype, row_name, fieldname, original_file_url, file_url):
+    """
+    Point every other row of the same child table (same parent document)
+    that still holds this file's local URL at the migrated S3 URL.
+
+    Customizations copy a row's Attach value onto sibling rows without
+    creating a File record per row - e.g. Shipment's
+    copy_invoice_attachments copies lr_document across invoices sharing a
+    dispatch address. Those rows are invisible to File-based sync and would
+    keep a dead local URL once the physical file is removed.
+
+    Matched only by exact original_file_url, never by filename, so a row
+    holding a different file that happens to share its name is untouched.
+
+    Parameters:
+        child_doctype (str, required): Child table doctype of the synced row.
+        row_name (str, required): Name of the row just synced.
+        fieldname (str, required): Attach field that was synced.
+        original_file_url (str, optional): The file's pre-migration local URL.
+        file_url (str, required): The migrated S3 URL to write.
+
+    Returns:
+        None
+    """
+    if not original_file_url:
+        return
+
+    row = frappe.db.get_value(child_doctype, row_name,
+                              ["parent", "parenttype", "parentfield"], as_dict=True)
+    if not (row and row.parent):
+        return
+
+    frappe.db.set_value(child_doctype, {
+        "parent": row.parent,
+        "parenttype": row.parenttype,
+        "parentfield": row.parentfield,
+        fieldname: original_file_url,
+    }, fieldname, file_url, update_modified=False)
 
 
 def has_other_pending_reference(doc, local_file_url):
@@ -524,15 +541,14 @@ def upload_existing_files_s3(name, file_name):
     resolved and updated in this same pass, instead of re-uploading the
     same bytes N times and hoping a later pass can still tell they match.
     """
-    file_doc_name = frappe.db.get_value('File', {'name': name})
-    if not file_doc_name:
-        return
 
     doc = frappe.get_doc('File', name)
-
-    if (doc.attached_to_doctype or 'File') in get_ignored_s3_doctypes():
+    if s3_file_regex_match(doc.file_url):
         return
-
+    ignored_doctypes = get_ignored_s3_doctypes()
+    if (doc.attached_to_doctype or 'File') in ignored_doctypes:
+        return
+    doc.validate_file_on_disk()
     # Already migrated - e.g. this File was resolved as a sibling below
     # during an earlier call in the same batch. Nothing left to upload.
     existing_key = get_s3_key_from_file_url(doc.file_url)
@@ -568,7 +584,6 @@ def upload_existing_files_s3(name, file_name):
     sync_attached_field_url(doc, file_url, path)
 
     if original_content_hash:
-        ignored_doctypes = get_ignored_s3_doctypes()
         siblings = frappe.get_all("File", filters={
             "name": ["!=", doc.name],
             "content_hash": original_content_hash,
@@ -612,8 +627,12 @@ def migrate_existing_files():
     # get_all_files_from_public_folder_and_upload_to_s3
     batch_size = 1000
     files_list = frappe.get_all(
-        'File',
-        fields=['name', 'file_url', 'file_name']
+        "File",
+        filters=[
+            ["file_url", "not like", "%frappe_s3_attachment.controller.generate_file%"],
+            ["file_url", "not like", "%https%"],
+        ],
+        fields=["name", "file_url", "file_name"]
     )
     files_to_migrate = [
         file for file in files_list
@@ -715,7 +734,8 @@ def delete_from_cloud(doc, method):
     if not frappe.db.get_single_value("S3 File Attachment", "enable_s3_attachment"):
         return
     s3 = S3Operations()
-    s3.delete_from_s3(doc.content_hash)
+    if not frappe.db.exists("File", {"content_hash": doc.content_hash, "name": ["!=", doc.name]}):
+        s3.delete_from_s3(doc.content_hash)
 
 
 @frappe.whitelist()
