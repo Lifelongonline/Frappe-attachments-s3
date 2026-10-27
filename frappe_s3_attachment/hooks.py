@@ -125,7 +125,7 @@ doc_events = {
 # Overriding Whitelisted Methods
 # ------------------------------
 #
-# override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "frappe_s3_attachment.event.get_events"
-# }
+override_whitelisted_methods = {
+	"frappe.core.api.file.unzip_file": "frappe_s3_attachment.controller.unzip_file"
+}
 

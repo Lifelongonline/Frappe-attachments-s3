@@ -1,10 +1,12 @@
 from __future__ import unicode_literals
 
 import datetime
+import io
 import os
 import random
 import re
 import string
+import zipfile
 
 import boto3
 
@@ -325,6 +327,52 @@ def generate_file(key=None, file_name=None):
     else:
         frappe.local.response['body'] = "Key not found."
     return
+
+
+@frappe.whitelist()
+def unzip_file(name: str):
+    """
+    Override of frappe.core.api.file.unzip_file that also supports zip files
+    stored on S3. Core resolves file_url to a path on local disk, which does
+    not exist once the file has been moved to S3.
+    """
+    file = frappe.get_doc("File", name)
+    key = get_s3_key_from_file_url(file.file_url)
+    if not key:
+        return file.unzip()
+
+    if not file.file_name.lower().endswith(".zip"):
+        frappe.throw(frappe._("{0} is not a zip file").format(file.file_name))
+
+    zip_content = S3Operations().read_file_from_s3(key)["Body"].read()
+
+    files = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
+            for member in z.filelist:
+                filename = os.path.basename(member.filename)
+                # skip directories, macos hidden directory and hidden files
+                if (
+                    member.is_dir()
+                    or member.filename.startswith("__MACOSX/")
+                    or filename.startswith(".")
+                ):
+                    continue
+
+                file_doc = frappe.new_doc("File")
+                file_doc.content = z.read(member.filename)
+                file_doc.file_name = filename
+                file_doc.folder = file.folder
+                file_doc.is_private = file.is_private
+                file_doc.attached_to_doctype = file.attached_to_doctype
+                file_doc.attached_to_name = file.attached_to_name
+                file_doc.save()
+                files.append(file_doc)
+    except zipfile.BadZipFile:
+        frappe.throw(frappe._("{0} is a not a valid zip file").format(file.file_name))
+
+    frappe.delete_doc("File", file.name)
+    return files
 
 
 def _matches_source_file(current_value, original_file_url, file_name):
